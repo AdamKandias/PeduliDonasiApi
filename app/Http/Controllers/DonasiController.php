@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Midtrans\Snap;
 
 class DonasiController extends Controller
 {
@@ -31,7 +32,6 @@ class DonasiController extends Controller
 
             DB::beginTransaction();
 
-            // Get authenticated user
             $user = Auth::user();
             if (!$user) {
                 return response()->json([
@@ -40,10 +40,12 @@ class DonasiController extends Controller
                 ], 401);
             }
 
-            // Get kampanye
             $kampanye = Kampanye::findOrFail($validated['kampanye_id']);
 
-            // Create donation record
+            // generate order id unik
+            $orderId = 'PD' . time() . rand(1000, 9999);
+
+            // simpan donasi di database (status pending)
             $donasi = Donasi::create([
                 'kampanye_id' => $validated['kampanye_id'],
                 'kampanye_nama' => $kampanye->nama,
@@ -54,11 +56,24 @@ class DonasiController extends Controller
                 'metode_pembayaran' => $validated['metode_pembayaran'],
                 'status' => 'pending',
                 'tanggal' => now(),
-                'order_id' => 'PD' . time() . rand(1000, 9999)
+                'order_id' => $orderId
             ]);
 
-            // Generate payment instructions based on method
-            $paymentInstructions = $this->generatePaymentInstructions($donasi, $validated['metode_pembayaran']);
+            // data untuk midtrans
+            $params = [
+                'transaction_details' => [
+                    'order_id' => $orderId,
+                    'gross_amount' => $donasi->jumlah,
+                ],
+                'customer_details' => [
+                    'first_name' => $user->name,
+                    'email' => $user->email,
+                ],
+                'enabled_payments' => ['bank_transfer', 'gopay', 'qris', 'shopeepay']
+            ];
+
+            // minta Snap Token ke midtrans
+            $snapToken = Snap::getSnapToken($params);
 
             DB::commit();
 
@@ -66,10 +81,9 @@ class DonasiController extends Controller
                 'success' => true,
                 'message' => 'Transaksi berhasil dibuat',
                 'order_id' => $donasi->order_id,
-                'payment_instructions' => $paymentInstructions,
+                'snap_token' => $snapToken, // ini dipakai di Android
                 'data' => $donasi
             ]);
-
         } catch (\Exception $e) {
             DB::rollBack();
             Log::error('Error creating donation: ' . $e->getMessage());
@@ -159,7 +173,6 @@ class DonasiController extends Controller
                 'message' => 'Pembayaran berhasil dikonfirmasi',
                 'data' => $donasi
             ]);
-
         } catch (\Exception $e) {
             Log::error('Payment confirmation error: ' . $e->getMessage());
             return response()->json([
